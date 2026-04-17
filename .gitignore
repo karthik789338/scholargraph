@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Data
+data/raw/
+data/interim/
+data/processed/
+data/indexes/
+
+# Outputs / checkpoints
+outputs/
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+*.npy
+*.npz
+*.pkl
+
+# Hugging Face / cache
+.cache/
+hf_cache/
+
+# Nested repos / external code
+external/scifact_open_repo/
