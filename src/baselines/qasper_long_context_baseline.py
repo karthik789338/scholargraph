@@ -38,7 +38,7 @@ def load_seq2seq_model(model_name: str):
         return _MODEL_CACHE[model_name]
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, use_safetensors=True)
     model.to(get_device())
     model.eval()
 

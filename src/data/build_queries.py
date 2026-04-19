@@ -8,8 +8,14 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from src.graph.schemas import Chunk, GoldEvidence, Query
 from src.utils.io import read_json, read_jsonl, write_jsonl
 from src.utils.logging import get_logger
+import json
 
 logger = get_logger(__name__)
+
+def load_raw_qasper_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 
 _QASPER_QUERY_RE = re.compile(r"^qasper_query_(.+)_(\d+)$")
 
