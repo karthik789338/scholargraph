@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 venv/
 .env
+.venv_broken_*/
 
 # IDE / OS
 .vscode/
@@ -28,6 +29,7 @@ checkpoints/
 *.npy
 *.npz
 *.pkl
+reports/
 
 # Hugging Face / cache
 .cache/
