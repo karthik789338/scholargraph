@@ -185,11 +185,17 @@ def build_claim_to_evidence_edges(
 def build_evidence_to_evidence_edges(
     evidence_nodes: Sequence[EvidenceNode],
     chunks_by_id: Dict[str, Chunk],
+    edge_threshold: float = 0.50,
 ) -> List[GraphEdge]:
     """
     Add lightweight structure among evidence nodes:
     - related if same document
     - slightly stronger if adjacent chunk indices within same document
+
+    Note:
+    This implementation thresholds the current lightweight edge score.
+    With the present graph builder, evidence-evidence scores are 0.3 for
+    same-document links and 0.5 for adjacent same-document links.
     """
     edges: List[GraphEdge] = []
 
@@ -210,6 +216,9 @@ def build_evidence_to_evidence_edges(
             score = 0.3
             if abs(chunk_a.chunk_index - chunk_b.chunk_index) <= 1:
                 score = 0.5
+
+            if score < edge_threshold:
+                continue
 
             relation = "related"
             edge_id = make_edge_id(a.evidence_id, b.evidence_id, relation)
@@ -232,6 +241,7 @@ def build_evidence_to_evidence_edges(
 def build_local_graph(
     graph_input: GraphInput,
     chunks_by_id: Dict[str, Chunk],
+    edge_threshold: float = 0.50,
 ) -> Dict[str, Any]:
     claim_nodes = build_claim_nodes(graph_input)
     evidence_nodes = build_evidence_nodes(graph_input, chunks_by_id)
@@ -244,6 +254,7 @@ def build_local_graph(
     evidence_edges = build_evidence_to_evidence_edges(
         evidence_nodes=evidence_nodes,
         chunks_by_id=chunks_by_id,
+        edge_threshold=edge_threshold,
     )
 
     graph_dict = {
@@ -260,6 +271,7 @@ def build_local_graph(
             "num_claim_nodes": len(claim_nodes),
             "num_evidence_nodes": len(evidence_nodes),
             "num_edges": len(claim_edges) + len(evidence_edges),
+            "edge_threshold": float(edge_threshold),
         },
     }
     return graph_dict
@@ -268,11 +280,12 @@ def build_local_graph(
 def build_local_graphs(
     graph_inputs: Sequence[GraphInput],
     chunks_by_id: Dict[str, Chunk],
+    edge_threshold: float = 0.50,
 ) -> List[Dict[str, Any]]:
     local_graphs: List[Dict[str, Any]] = []
 
     for idx, graph_input in enumerate(graph_inputs, start=1):
-        local_graphs.append(build_local_graph(graph_input, chunks_by_id))
+        local_graphs.append(build_local_graph(graph_input, chunks_by_id, edge_threshold=edge_threshold))
 
         if idx % 100 == 0:
             logger.info(f"Built local graphs for {idx}/{len(graph_inputs)} queries")
@@ -286,6 +299,12 @@ def main() -> None:
     parser.add_argument("--graph-inputs", required=True, help="Path to graph_inputs JSONL")
     parser.add_argument("--chunks", required=True, help="Path to chunk JSONL")
     parser.add_argument("--output", required=True, help="Path to output local_graphs JSONL")
+    parser.add_argument(
+        "--edge-threshold",
+        type=float,
+        default=0.50,
+        help="Threshold applied to evidence-evidence edge scores.",
+    )
 
     args = parser.parse_args()
 
@@ -296,6 +315,7 @@ def main() -> None:
     local_graphs = build_local_graphs(
         graph_inputs=graph_inputs,
         chunks_by_id=chunks_by_id,
+        edge_threshold=args.edge_threshold,
     )
 
     write_jsonl(local_graphs, args.output)

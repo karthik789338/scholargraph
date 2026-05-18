@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import joblib
@@ -20,7 +18,6 @@ from src.graph.schemas import Chunk, GraphInput, Query
 from src.graph.scifact_graph_verdict import (
     aggregate_graph_scores,
     build_graph_node_weights,
-    extract_evidence_degree_weights,
     load_chunks,
     load_graph_inputs,
     load_local_graphs,
@@ -39,6 +36,39 @@ LABEL_TO_ID = {
     "insufficient": 2,
 }
 ID_TO_LABEL = {v: k for k, v in LABEL_TO_ID.items()}
+
+
+def _safe_mean(xs: Sequence[float]) -> float:
+    return 0.0 if not xs else float(sum(xs) / len(xs))
+
+
+def _graph_num_edges(graph_obj) -> int:
+    """
+    Count only evidence<->evidence edges, because those are the edges actually
+    used by the graph-aware weighting logic in scifact_graph_verdict.py.
+    """
+    if graph_obj is None:
+        return 0
+
+    edges = []
+    if isinstance(graph_obj, dict):
+        if "edges" in graph_obj and graph_obj["edges"] is not None:
+            edges = graph_obj["edges"]
+        elif "graph_edges" in graph_obj and graph_obj["graph_edges"] is not None:
+            edges = graph_obj["graph_edges"]
+    elif hasattr(graph_obj, "edges"):
+        try:
+            edges = list(graph_obj.edges)
+        except Exception:
+            edges = []
+
+    count = 0
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        if edge.get("src_type") == "evidence" and edge.get("dst_type") == "evidence":
+            count += 1
+    return count
 
 
 def score_selected_chunks(
@@ -165,7 +195,6 @@ def build_feature_dict(
     mean_retrieval_score = float(sum(retrieval_values) / len(retrieval_values)) if retrieval_values else 0.0
 
     features: Dict[str, float] = {
-        # graph aggregate features
         "graph_support_score": float(agg["graph_support_score"]),
         "graph_refute_score": float(agg["graph_refute_score"]),
         "graph_neutral_score": float(agg["graph_neutral_score"]),
@@ -173,31 +202,26 @@ def build_feature_dict(
         "graph_margin_signed": float(agg["graph_support_score"] - agg["graph_refute_score"]),
         "graph_margin_abs": float(abs(agg["graph_support_score"] - agg["graph_refute_score"])),
 
-        # strongest local signals
         "best_support_score": float(best_support),
         "best_refute_score": float(best_refute),
         "best_neutral_score": float(best_neutral),
         "best_margin_signed": float(best_support - best_refute),
         "best_margin_abs": float(abs(best_support - best_refute)),
 
-        # evidence count features
         "support_gt_05": float(support_gt_05),
         "refute_gt_05": float(refute_gt_05),
         "neutral_gt_05": float(neutral_gt_05),
         "support_gt_07": float(support_gt_07),
         "refute_gt_07": float(refute_gt_07),
 
-        # node-weight distribution features
         "node_weight_entropy": float(entropy),
         "max_node_weight": float(max_node_weight),
         "min_node_weight": float(min_node_weight),
         "mean_node_weight": float(mean_node_weight),
 
-        # compact retrieval strength features
         "max_retrieval_score": float(max_retrieval_score),
         "mean_retrieval_score": float(mean_retrieval_score),
 
-        # minimal size signal
         "num_scored_chunks": float(len(scored_chunks)),
     }
 
@@ -240,6 +264,9 @@ def build_feature_rows(
             top_nli_chunks=top_nli_chunks,
         )
 
+        num_nodes = len(selected_chunk_ids)
+        num_edges = _graph_num_edges(local_graph)
+
         rows.append(
             {
                 "query_id": graph_input.query_id,
@@ -248,6 +275,8 @@ def build_feature_rows(
                 "scored_chunks": scored_chunks,
                 "node_weights": node_weights,
                 "graph_scores": graph_scores,
+                "num_nodes": int(num_nodes),
+                "num_edges": int(num_edges),
             }
         )
 
@@ -392,6 +421,19 @@ def main() -> None:
     parser.add_argument("--top-nli-chunks", type=int, default=3)
     parser.add_argument("--max-evidence-chunks", type=int, default=1)
 
+    parser.add_argument(
+        "--edge-threshold",
+        type=float,
+        default=0.50,
+        help="Recorded cosine-similarity threshold metadata for graph construction.",
+    )
+    parser.add_argument(
+        "--analysis-jsonl-out",
+        type=str,
+        default="",
+        help="Optional JSONL path for per-query graph statistics and predictions.",
+    )
+
     args = parser.parse_args()
 
     output_dir = ensure_dir(args.output_dir)
@@ -451,6 +493,27 @@ def main() -> None:
         max_evidence_chunks=args.max_evidence_chunks,
     )
 
+    analysis_rows = []
+    graph_num_nodes_all = []
+    graph_num_edges_all = []
+
+    for row, pred in zip(dev_rows, dev_predictions):
+        num_nodes = int(row.get("num_nodes", 0))
+        num_edges = int(row.get("num_edges", 0))
+        graph_num_nodes_all.append(num_nodes)
+        graph_num_edges_all.append(num_edges)
+
+        analysis_rows.append(
+            {
+                "query_id": row["query_id"],
+                "gold_label": row["gold_label"],
+                "predicted_label": pred["predicted_label"],
+                "num_nodes": num_nodes,
+                "num_edges": num_edges,
+                "edge_threshold": float(args.edge_threshold),
+            }
+        )
+
     train_metrics = evaluate_scifact_predictions(
         queries=train_queries,
         predictions=train_predictions,
@@ -471,18 +534,33 @@ def main() -> None:
     write_json(train_metrics, output_dir / "train_metrics.json")
     write_json(dev_metrics, output_dir / "dev_metrics.json")
     write_json(feature_importance, output_dir / "feature_importance.json")
-    write_json(
-        {
-            "feature_names": feature_names,
-            "train_num_examples": len(X_train),
-            "dev_num_examples": len(X_dev),
-            "train_label_macro_f1": train_metrics["label_metrics"]["macro_f1"],
-            "train_evidence_micro_f1": train_metrics["evidence_metrics"]["micro_f1"],
-            "dev_label_macro_f1": dev_metrics["label_metrics"]["macro_f1"],
-            "dev_evidence_micro_f1": dev_metrics["evidence_metrics"]["micro_f1"],
+
+    if args.analysis_jsonl_out:
+        write_jsonl(analysis_rows, args.analysis_jsonl_out)
+
+    num_queries = len(graph_num_edges_all)
+    num_zero = sum(1 for x in graph_num_edges_all if x == 0)
+    num_one = sum(1 for x in graph_num_edges_all if x == 1)
+    num_two_plus = sum(1 for x in graph_num_edges_all if x >= 2)
+
+    summary = {
+        "feature_names": feature_names,
+        "train_num_examples": len(X_train),
+        "dev_num_examples": len(X_dev),
+        "train_label_macro_f1": train_metrics["label_metrics"]["macro_f1"],
+        "train_evidence_micro_f1": train_metrics["evidence_metrics"]["micro_f1"],
+        "dev_label_macro_f1": dev_metrics["label_metrics"]["macro_f1"],
+        "dev_evidence_micro_f1": dev_metrics["evidence_metrics"]["micro_f1"],
+        "edge_threshold": float(args.edge_threshold),
+        "graph_stats": {
+            "avg_nodes_per_query": _safe_mean(graph_num_nodes_all),
+            "avg_edges_per_query": _safe_mean(graph_num_edges_all),
+            "pct_queries_zero_edges": 0.0 if num_queries == 0 else num_zero / num_queries,
+            "pct_queries_one_edge": 0.0 if num_queries == 0 else num_one / num_queries,
+            "pct_queries_two_plus_edges": 0.0 if num_queries == 0 else num_two_plus / num_queries,
         },
-        output_dir / "summary.json",
-    )
+    }
+    write_json(summary, output_dir / "summary.json")
 
     logger.info(f"Train label macro F1: {train_metrics['label_metrics']['macro_f1']:.4f}")
     logger.info(f"Train evidence micro F1: {train_metrics['evidence_metrics']['micro_f1']:.4f}")
